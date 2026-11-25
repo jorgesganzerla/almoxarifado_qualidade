@@ -150,3 +150,5 @@ before merging** e **Require status checks to pass before merging**, selecionand
   Dependabot/Renovate).
 - Não há etapa de implantação (CD) nem observabilidade: o sistema é desktop e o pipeline termina no
   artefato `almoxarifado.jar`.
+
+-
