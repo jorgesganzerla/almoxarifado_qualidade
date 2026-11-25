@@ -1,0 +1,136 @@
+name: CI - Quality Gates (QAOps)
+
+# Acionamento: todo push e todo pull request para a branch principal
+# (e execução manual pela aba Actions, útil na demonstração).
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+# Princípio do menor privilégio: o token do pipeline só lê o repositório.
+permissions:
+  contents: read
+
+# Um novo push na mesma branch cancela a execução anterior, que já ficou obsoleta.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualidade:
+    name: Quality gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      # O banco usado nos testes é descartável e só existe durante a execução.
+      DB_URL: jdbc:mysql://127.0.0.1:3306/almoxarifado_test?useSSL=false&allowPublicKeyRetrieval=true
+      DB_USER: root
+
+    steps:
+      - name: Obter código
+        uses: actions/checkout@v4
+
+      # ---------------- DEPENDÊNCIAS ----------------
+      - name: Configurar JDK 21 e cache de dependências do Maven
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # Nenhuma senha fica no repositório. Se o segredo DB_PASSWORD existir em
+      # Settings > Secrets and variables > Actions, ele é usado; caso contrário é
+      # gerada uma senha aleatória válida só para esta execução. Em ambos os casos
+      # o valor é mascarado nos logs.
+      - name: Preparar senha do banco descartável
+        env:
+          SEGREDO_DB: ${{ secrets.DB_PASSWORD }}
+        run: |
+          if [ -n "$SEGREDO_DB" ]; then
+            SENHA="$SEGREDO_DB"
+            echo "Usando o segredo DB_PASSWORD do repositório."
+          else
+            SENHA="$(openssl rand -hex 16)"
+            echo "Segredo DB_PASSWORD não configurado: usando senha aleatória descartável."
+          fi
+          echo "::add-mask::$SENHA"
+          echo "DB_PASSWORD=$SENHA" >> "$GITHUB_ENV"
+
+      # ---------------- GATE 1: BUILD ----------------
+      - name: "Gate 1 - Build (compilação e empacotamento)"
+        id: gate_build
+        run: mvn -B -ntp clean package -DskipTests
+
+      # ---------------- GATE 2: ANÁLISE ESTÁTICA ----------------
+      - name: "Gate 2 - Análise estática (Checkstyle)"
+        id: gate_estatica
+        run: mvn -B -ntp checkstyle:check
+
+      # ---------------- GATE 5: DEPENDÊNCIAS VULNERÁVEIS ----------------
+      # Trivy lê o pom.xml, resolve as dependências (diretas e transitivas) e reprova se
+      # houver vulnerabilidade HIGH ou CRITICAL. Versão fixada de propósito: as imagens
+      # 0.69.4–0.69.6 e a tag "latest" foram comprometidas em março/2026 (CVE-2026-33634);
+      # 0.69.3 é a última versão confirmada como íntegra.
+      - name: "Gate 5 - Dependências vulneráveis (Trivy)"
+        id: gate_dependencias
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src aquasec/trivy:0.69.3 \
+            fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
+            --skip-dirs target --output trivy-dependencias.txt . || status=$?
+          cat trivy-dependencias.txt
+          exit ${status:-0}
+
+      - name: Subir MySQL 8 para os testes de integração
+        run: |
+          docker run -d --name mysql-ci \
+            -e MYSQL_ROOT_PASSWORD="$DB_PASSWORD" \
+            -e MYSQL_DATABASE=almoxarifado_test \
+            -p 3306:3306 mysql:8.0
+          for i in $(seq 1 40); do
+            if docker exec mysql-ci mysqladmin ping -h 127.0.0.1 -uroot -p"$DB_PASSWORD" --silent; then
+              echo "MySQL pronto"; exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::MySQL não ficou pronto a tempo"; docker logs mysql-ci; exit 1
+
+      # ---------------- GATE 3: TESTES ----------------
+      - name: "Gate 3 - Testes unitários e de integração"
+        id: gate_testes
+        run: mvn -B -ntp verify
+
+      # ---------------- GATE 4: COBERTURA ----------------
+      - name: "Gate 4 - Cobertura (JaCoCo: linhas >= 80% e ramos de service >= 90%)"
+        id: gate_cobertura
+        run: mvn -B -ntp jacoco:check
+
+      # ---------------- RELATÓRIOS / EVIDÊNCIAS ----------------
+      # Executados mesmo quando um gate falha (if: always()), para que a
+      # reprovação também deixe evidências.
+      - name: Resumo dos quality gates
+        if: always()
+        env:
+          GATE_BUILD: ${{ steps.gate_build.outcome }}
+          GATE_ESTATICA: ${{ steps.gate_estatica.outcome }}
+          GATE_DEPENDENCIAS: ${{ steps.gate_dependencias.outcome }}
+          GATE_TESTES: ${{ steps.gate_testes.outcome }}
+          GATE_COBERTURA: ${{ steps.gate_cobertura.outcome }}
+        run: python3 ci/resumo_qualidade.py >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar relatórios (artefato evidencias-qualidade)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencias-qualidade
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+            target/site/jacoco/
+            target/checkstyle-result.xml
+            trivy-dependencias.txt
+            target/almoxarifado.jar
