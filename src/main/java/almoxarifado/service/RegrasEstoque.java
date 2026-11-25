@@ -50,7 +50,7 @@ public final class RegrasEstoque {
 
     /** Indica se o estoque atual comporta a retirada solicitada. */
     public static boolean podeRetirar(int estoqueAtual, int quantidadeSolicitada) {
-        return quantidadeSolicitada > 0 && estoqueAtual >= quantidadeSolicitada;
+        return quantidadeSolicitada > 0 && estoqueAtual > quantidadeSolicitada;
     }
 
     private static boolean estaVazio(String texto) {
