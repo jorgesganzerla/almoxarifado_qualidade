@@ -1,0 +1,12 @@
+target/
+*.class
+*.jar
+*.log
+.idea/
+*.iml
+.vscode/
+.DS_Store
+# Configurações locais e segredos nunca vão para o Git
+.env
+.env.*
+*.properties.local
