@@ -1,7 +1,6 @@
 package almoxarifado.service;
 
 import java.util.List;
-import java.util.Date;
 /** Monta o texto exibido nas telas de relatório. */
 public final class FormatadorRelatorio {
 
